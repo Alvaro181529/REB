@@ -172,7 +172,7 @@ export function DisabilitiesPage({
     setDates({ ...dates, baja: date });
     if (!selectedEmployee || !date) return;
     // Usar split para evitar problemas de zona horaria con new Date()
-    const [y, m, d] = date.split('-').map(Number);
+    const [y, m, _d] = date.split('-').map(Number);
     const month = m;
     const year = y;
 

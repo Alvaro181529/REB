@@ -1,4 +1,3 @@
-import React from "react";
 import { motion } from "framer-motion";
 import { 
   Users, 
@@ -6,7 +5,6 @@ import {
   DollarSign, 
   TrendingUp, 
   FileSpreadsheet, 
-  Briefcase, 
   ArrowRight 
 } from "lucide-react";
 import { LoadedFile } from "../../types";

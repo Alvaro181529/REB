@@ -1,12 +1,10 @@
-import React, { useState } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
   Search, 
   History, 
   User, 
   Calendar, 
-  DollarSign, 
-  ArrowRight,
   ChevronRight,
   FileText
 } from "lucide-react";

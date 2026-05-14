@@ -196,7 +196,7 @@ export const exportDisabilitiesToExcel = async (
   const totalSubsidio = filtered.reduce((acc, curr) => acc + (curr.calculations.totalToPay || 0), 0);
 
   // 4. TOTAL Y LITERAL
-  const totalRowIdx = wsData.length;
+
   wsData.push([
     '', '', '', '', '', '', '',
     { v: 'TOTAL:', s: sTotalLabel },
@@ -323,7 +323,7 @@ export const exportEmployeeSourceData = async (
     alignment: { horizontal: "center" }
   };
 
-  const sBold = { font: { bold: true, sz: 10 } };
+
   const sSignature = { font: { bold: true, sz: 10 }, alignment: { horizontal: "center" } };
 
   // Limpiar llaves y obtener cabeceras

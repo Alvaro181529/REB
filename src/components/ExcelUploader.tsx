@@ -1,6 +1,5 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
-import * as XLSX from 'xlsx';
-import { Upload, FileSpreadsheet, Database, Table, CheckCircle2, AlertCircle, X, Layers } from 'lucide-react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { Upload, FileSpreadsheet, CheckCircle2, X, Layers } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from "@tauri-apps/api/core";
 
@@ -17,7 +16,7 @@ interface ExcelUploaderProps {
   onFilesUpdated: (files: LoadedFile[]) => void;
 }
 
-const ExcelUploader: React.FC<ExcelUploaderProps> = ({ onFilesUpdated }) => {
+const ExcelUploader = ({ onFilesUpdated }: ExcelUploaderProps) => {
   const [isDragging, setIsDragging] = useState(false);
   const [loadedFiles, setLoadedFiles] = useState<LoadedFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
