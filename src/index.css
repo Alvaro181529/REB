@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-dark: #0f172a;
+  --color-brand-card: rgba(30, 41, 59, 0.7);
+  --background-image-brand-gradient: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+}
+
+:root {
+  font-family: 'Inter', system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  color-scheme: dark;
+  color: rgba(255, 255, 255, 0.87);
+  background-color: #0f172a;
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  @apply bg-brand-gradient;
+}
+
+#root {
+  width: 100%;
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-brand-card backdrop-blur-xl border border-white/10 rounded-3xl p-8 shadow-2xl transition-all duration-300 hover:border-indigo-500/50;
+  }
+
+  .btn-primary {
+    @apply bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-2.5 px-6 rounded-xl transition-all duration-200 transform hover:-translate-y-0.5 active:translate-y-0 shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30;
+  }
+
+  .upload-area {
+    @apply border-2 border-dashed border-white/10 rounded-2xl p-12 flex flex-col items-center gap-4 cursor-pointer transition-all duration-300 hover:border-indigo-500/50 hover:bg-indigo-500/5;
+  }
+
+  .upload-area-dragging {
+    @apply border-emerald-500 bg-emerald-500/10;
+  }
+}
+
+@layer utilities {
+  .animate-spin-reverse {
+    animation: spin-reverse 1s linear infinite;
+  }
+}
+
+@keyframes spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.1);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(99, 102, 241, 0.2);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(99, 102, 241, 0.4);
+}
