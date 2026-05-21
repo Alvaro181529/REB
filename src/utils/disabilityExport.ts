@@ -150,7 +150,13 @@ export const exportDisabilitiesToExcel = async (
 
     let year = '', month = '', day = '';
     if (raw.includes('-')) {
-      [year, month, day] = raw.split('-');
+      // ISO format: YYYY-MM-DD  (also handles YYYY-MM-DDTHH:mm:ssZ)
+      const isoMatch = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+      if (isoMatch) {
+        [, year, month, day] = isoMatch;
+      } else {
+        [year, month, day] = raw.split('-');
+      }
     } else if (raw.includes('/')) {
       const parts = raw.split('/');
       if (parts[0]?.length === 4) {
@@ -161,10 +167,18 @@ export const exportDisabilitiesToExcel = async (
     }
 
     if (!year || !month || !day) {
-      const parsed = new Date(raw);
-      return isNaN(parsed.getTime()) ? null : parsed;
+      // Último recurso: intentar extraer componentes numéricos del string
+      // para evitar que new Date(string) use UTC y cause desfase de día.
+      const numericMatch = raw.match(/(\d{4})[^\d](\d{1,2})[^\d](\d{1,2})/);
+      if (numericMatch) {
+        const [, y, m, d] = numericMatch;
+        const fallback = new Date(Number(y), Number(m) - 1, Number(d));
+        return isNaN(fallback.getTime()) ? null : fallback;
+      }
+      return null; // No se pudo parsear de forma segura
     }
 
+    // Siempre construir con hora local (evita el bug UTC-vs-local)
     const date = new Date(Number(year), Number(month) - 1, Number(day));
     return isNaN(date.getTime()) ? null : date;
   };
@@ -172,7 +186,16 @@ export const exportDisabilitiesToExcel = async (
   const excelDateCell = (dateValue: string) => {
     const date = parseExcelDate(dateValue);
     if (!date) return { v: dateValue, s: sData };
-    return { v: date, t: 'd', z: 'dd/mm/yyyy', s: sData };
+    // Construir el Date al mediodía hora local: así cuando SheetJS lo serializa
+    // a UTC (medianoche UTC = día anterior en UTC-N), sigue siendo el mismo
+    // día calendario porque 12:00 local - 4h = 16:00 UTC (mismo día).
+    const localNoon = new Date(
+      date.getFullYear(),
+      date.getMonth(),
+      date.getDate(),
+      12, 0, 0
+    );
+    return { v: localNoon, t: 'd', z: 'dd/mm/yyyy', s: sData };
   };
 
   filtered.forEach((d, i) => {
@@ -211,7 +234,7 @@ export const exportDisabilitiesToExcel = async (
   wsData.push([], []);
   const firstSigRow = wsData.length;
   wsData.push([{ v: 'Sgto Lic. Petronila Arminda Perez', s: sSignature }]);
-  wsData.push([{ v: 'Enc. Subcidio de incapacidad temporal (nit)', s: sSignature }]);
+  wsData.push([{ v: 'ENC. SUBCIDIO DE INCAPACIDAD TEMPORAL (SIT)', s: sSignature }]);
   wsData.push([{ v: 'POLICIA BOLIVIANA', s: sSignature }]);
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -331,7 +354,7 @@ export const exportEmployeeSourceData = async (
   const rawKeys = Object.keys(filtered[0]);
 
   const wsData: any[][] = [
-    [{ v: `REGISTROS FUENTE - ${name}`, s: sTitle }],
+    [{ v: `PLANILLA SALARIAL - ${name}`, s: sTitle }],
     [{ v: `PERIODO: ${getMonthName(startMonth)} A ${getMonthName(endMonth)}`, s: sTitle }],
     [],
     keys.map(k => ({ v: k, s: sHeader }))
@@ -345,7 +368,7 @@ export const exportEmployeeSourceData = async (
   wsData.push([], []);
   const firstSigRow = wsData.length;
   wsData.push([{ v: 'Sgto Lic. Petronila Arminda Perez', s: sSignature }]);
-  wsData.push([{ v: 'Enc. Subcidio de incapacidad temporal (nit)', s: sSignature }]);
+  wsData.push([{ v: 'ENC. SUBCIDIO DE INCAPACIDAD TEMPORAL (SIT)', s: sSignature }]);
   wsData.push([{ v: 'POLICIA BOLIVIANA', s: sSignature }]);
 
   const ws = XLSX.utils.aoa_to_sheet(wsData);

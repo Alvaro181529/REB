@@ -11,7 +11,10 @@ import {
   Trash2,
   AlertCircle,
   Download,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Pencil,
+  X,
+  Check
 } from "lucide-react";
 import { DisabilityRecord } from "../../types";
 import { invoke } from "@tauri-apps/api/core";
@@ -43,9 +46,15 @@ export function DisabilitiesPage({
   const [dates, setDates] = useState({ baja: '', alta: '' });
   const [disabilityFilter, setDisabilityFilter] = useState<'all' | 'enfermedad' | 'maternidad' | 'accidente'>('all');
   const [selectedMonthGroup, setSelectedMonthGroup] = useState<string>('all');
-  const [selectedCityFilter, setSelectedCityFilter] = useState<string>('all');
+  const [selectedCityFilter, setSelectedCityFilter] = useState<string>('La Paz');
   const [currentPage, setCurrentPage] = useState<number>(1);
   const [city, setCity] = useState<string>("La Paz");
+  const [tableSearchQuery, setTableSearchQuery] = useState("");
+  const [editingRecord, setEditingRecord] = useState<DisabilityRecord | null>(null);
+  const [editDraft, setEditDraft] = useState<{
+    baja: string; alta: string; type: 'enfermedad' | 'maternidad' | 'accidente';
+    basicSalary: number; city: string; insuredNumber: string;
+  } | null>(null);
   const ITEMS_PER_PAGE = 10;
 
   const BOLIVIAN_CITIES = [
@@ -312,13 +321,25 @@ export function DisabilitiesPage({
   const handleExport = async () => {
     if (disabilityFilter === 'all') return;
 
-    let recordsToExport = disabilities.filter(d => d.type === disabilityFilter);
-    if (selectedMonthGroup !== 'all') {
-      recordsToExport = recordsToExport.filter(d => {
-        const parts = d.dates.alta.split('-');
-        const yearMonth = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : 'Desconocido';
-        return yearMonth === selectedMonthGroup;
-      });
+    // Requiere un mes específico seleccionado
+    if (selectedMonthGroup === 'all') {
+      alert('Por favor selecciona un mes específico en el filtro "Periodo" antes de generar el reporte.');
+      return;
+    }
+
+    // Filtrar por tipo + mes (FECHA FIN) + ciudad
+    let recordsToExport = disabilities.filter(d => {
+      if (d.type !== disabilityFilter) return false;
+      const parts = d.dates.alta.split('-');
+      const yearMonth = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : 'Desconocido';
+      if (yearMonth !== selectedMonthGroup) return false;
+      if (selectedCityFilter !== 'all' && d.city !== selectedCityFilter) return false;
+      return true;
+    });
+
+    if (recordsToExport.length === 0) {
+      alert(`No hay registros de ${disabilityFilter} para el periodo ${selectedMonthGroup}.`);
+      return;
     }
 
     // Ordenar alfabéticamente por nombre de empleado
@@ -327,7 +348,7 @@ export function DisabilitiesPage({
     await exportDisabilitiesToExcel(
       recordsToExport,
       disabilityFilter,
-      selectedMonthGroup !== 'all' ? selectedMonthGroup : undefined,
+      selectedMonthGroup,
       selectedCityFilter !== 'all' ? selectedCityFilter : undefined
     );
   };
@@ -338,6 +359,58 @@ export function DisabilitiesPage({
     return months[monthIndex] || monthStr;
   };
 
+  // --- Edit handlers ---
+  const handleStartEdit = (record: DisabilityRecord) => {
+    setEditingRecord(record);
+    setEditDraft({
+      baja: record.dates.baja,
+      alta: record.dates.alta,
+      type: record.type,
+      basicSalary: record.calculations.basicSalary,
+      city: record.city || 'La Paz',
+      insuredNumber: record.calculations.insuredNumber || '',
+    });
+  };
+
+  const handleCancelEdit = () => { setEditingRecord(null); setEditDraft(null); };
+
+  const handleSaveEdit = async () => {
+    if (!editingRecord || !editDraft) return;
+    const rawDays = calculateDays(editDraft.baja, editDraft.alta);
+    const effectiveDays = editDraft.type === 'enfermedad' ? Math.max(0, rawDays - 3) : rawDays;
+    const pct = getPercentage(editDraft.type);
+    const dailyR = editDraft.basicSalary / 30;
+    const pctAmt = dailyR * pct;
+    const totalPay = pctAmt * effectiveDays;
+    const updated: DisabilityRecord = {
+      ...editingRecord,
+      type: editDraft.type,
+      city: editDraft.city,
+      dates: { baja: editDraft.baja, alta: editDraft.alta },
+      calculations: {
+        ...editingRecord.calculations,
+        basicSalary: editDraft.basicSalary,
+        dailyRate: dailyR,
+        percentage: pct * 100,
+        percentageAmount: pctAmt,
+        totalDays: effectiveDays,
+        totalToPay: totalPay,
+        insuredNumber: editDraft.insuredNumber,
+      }
+    };
+    try {
+      setIsLoading(true);
+      await invoke("update_disability", { id: editingRecord.id, data: updated });
+      await fetchDisabilities();
+      handleCancelEdit();
+    } catch (err) {
+      alert("Error al actualizar la planilla");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  // --- Filtered + searched records ---
   const filteredDisabilities = disabilities.filter(d =>
     (disabilityFilter === 'all' || d.type === disabilityFilter) &&
     (selectedCityFilter === 'all' || d.city === selectedCityFilter)
@@ -353,12 +426,25 @@ export function DisabilitiesPage({
 
   const sortedMonths = Object.keys(groupedDisabilities).sort((a, b) => b.localeCompare(a));
 
-  let recordsToPaginate: DisabilityRecord[] = [];
+  let baseRecords: DisabilityRecord[] = [];
   if (selectedMonthGroup === 'all') {
-    recordsToPaginate = filteredDisabilities.sort((a, b) => b.dates.alta.localeCompare(a.dates.alta));
+    baseRecords = filteredDisabilities.slice().sort((a, b) => b.dates.alta.localeCompare(a.dates.alta));
   } else {
-    recordsToPaginate = groupedDisabilities[selectedMonthGroup] || [];
+    baseRecords = (groupedDisabilities[selectedMonthGroup] || []).slice();
   }
+
+  // Apply table search
+  const tq = tableSearchQuery.toLowerCase().trim();
+  let recordsToPaginate: DisabilityRecord[] = tq
+    ? baseRecords.filter(d =>
+      d.employeeName.toLowerCase().includes(tq) ||
+      (d.ci || '').toLowerCase().includes(tq) ||
+      (d.city || '').toLowerCase().includes(tq) ||
+      d.type.toLowerCase().includes(tq) ||
+      d.dates.baja.includes(tq) ||
+      d.dates.alta.includes(tq)
+    )
+    : baseRecords;
 
   const totalPages = Math.ceil(recordsToPaginate.length / ITEMS_PER_PAGE) || 1;
   const startIndex = (currentPage - 1) * ITEMS_PER_PAGE;
@@ -406,9 +492,25 @@ export function DisabilitiesPage({
                   exit={{ opacity: 0, x: -10, scale: 0.9 }}
                   transition={{ type: "spring", stiffness: 400, damping: 25 }}
                   onClick={handleExport}
-                  className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-emerald-600 transition-colors shadow-lg shadow-emerald-500/30 shrink-0 ml-1"
+                  title={selectedMonthGroup === 'all' ? 'Selecciona un periodo para exportar' : `Exportar ${disabilityFilter} - ${selectedMonthGroup !== 'all' ? getMonthName(selectedMonthGroup.split('-')[1]) + ' ' + selectedMonthGroup.split('-')[0] : ''}`}
+                  className={`flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shrink-0 ml-1 ${
+                    selectedMonthGroup !== 'all'
+                      ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/30'
+                      : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'
+                  }`}
                 >
-                  <Download size={14} /> Reporte
+                  <div className="flex items-center gap-1.5">
+                    <Download size={13} />
+                    <span>Reporte</span>
+                  </div>
+                  {selectedMonthGroup !== 'all' && (
+                    <span className="text-[8px] font-bold normal-case tracking-normal opacity-80">
+                      {getMonthName(selectedMonthGroup.split('-')[1])} {selectedMonthGroup.split('-')[0]}
+                    </span>
+                  )}
+                  {selectedMonthGroup === 'all' && (
+                    <span className="text-[8px] font-medium normal-case tracking-normal opacity-60">Elige periodo</span>
+                  )}
                 </motion.button>
               )}
             </AnimatePresence>
@@ -570,7 +672,7 @@ export function DisabilitiesPage({
                         type="text"
                         value={insuredNumber}
                         onChange={(e) => setInsuredNumber(e.target.value)}
-                        className="text-[10px] font-mono bg-indigo-500/10 px-2 py-1 rounded text-indigo-300 border border-indigo-500/20 focus:border-indigo-500/50 focus:outline-none w-32 text-right"
+                        className="text-[15px] font-bold font-mono bg-indigo-500/10 px-4 py-1 rounded-lg text-indigo-300 border border-indigo-500/20 focus:border-indigo-500/50 focus:outline-none w-48 text-right"
                       />
                     </div>
                   </motion.div>
@@ -724,11 +826,33 @@ export function DisabilitiesPage({
       </AnimatePresence>
 
       <div className="glass-card !p-0 overflow-hidden border-white/5">
-        <div className="p-6 border-b border-white/5 flex justify-between items-center bg-white/[0.01]">
-          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 flex items-center gap-2">
+        <div className="p-4 border-b border-white/5 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-white/[0.01]">
+          <h3 className="text-sm font-black uppercase tracking-widest text-slate-400 flex items-center gap-2 shrink-0">
             <TableIcon size={16} className="text-indigo-500" />
             Planillas Generadas
+            <span className="text-[10px] font-bold text-slate-600 normal-case tracking-normal">
+              ({recordsToPaginate.length})
+            </span>
           </h3>
+          {/* Barra de búsqueda de la tabla */}
+          <div className="relative w-full sm:max-w-xs">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 pointer-events-none" />
+            <input
+              type="text"
+              placeholder={`Buscar en ${disabilityFilter === 'all' ? 'todas' : disabilityFilter}...`}
+              value={tableSearchQuery}
+              onChange={e => { setTableSearchQuery(e.target.value); setCurrentPage(1); }}
+              className="w-full bg-white/5 border border-white/10 rounded-xl pl-8 pr-8 py-2 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-500/50 transition-all"
+            />
+            {tableSearchQuery && (
+              <button
+                onClick={() => { setTableSearchQuery(''); setCurrentPage(1); }}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-white transition-colors"
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -750,71 +874,236 @@ export function DisabilitiesPage({
                       Mes: {month !== 'Desconocido' ? `${getMonthName(month.split('-')[1])} ${month.split('-')[0]}` : month}
                     </td>
                   </tr>
-                  {paginatedGroups[month].map((d, i) => (
-                    <tr key={d.id || i} className="hover:bg-white/[0.02] transition-all group">
-                      <td className="py-5 px-6">
-                        <div className="flex flex-col">
-                          <span className="text-sm font-bold text-white group-hover:text-indigo-400 transition-colors">{d.employeeName}</span>
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="text-[10px] text-slate-500 font-medium">CI: {d.ci || "—"}</span>
-                            <span className="h-1 w-1 rounded-full bg-slate-700"></span>
-                            <span className="text-[10px] text-slate-500 font-medium">{d.city || "—"}</span>
-                            <span className="h-1 w-1 rounded-full bg-slate-700"></span>
-                            <span className="text-[10px] font-mono text-indigo-400/70">{d.calculations.insuredNumber}</span>
+                  {paginatedGroups[month].map((d, i) =>
+                    editingRecord?.id === d.id && editDraft ? (
+                      // ─── FILA DE EDICIÓN EXPANDIDA ────────────────────────
+                      <tr key={d.id || i}>
+                        <td colSpan={6} className="p-0">
+                          <div className="mx-2 my-2 rounded-2xl border border-indigo-500/30 bg-gradient-to-br from-indigo-950/60 to-slate-900/80 shadow-2xl shadow-indigo-500/10 overflow-hidden">
+                            {/* Header de edición */}
+                            <div className="flex items-center justify-between px-5 py-3 border-b border-indigo-500/20 bg-indigo-500/10">
+                              <div className="flex items-center gap-2">
+                                <Pencil size={13} className="text-indigo-400" />
+                                <span className="text-[10px] font-black uppercase tracking-widest text-indigo-300">Editando</span>
+                                <span className="text-xs font-bold text-white ml-1">{editingRecord.employeeName}</span>
+                              </div>
+                              <button onClick={handleCancelEdit} className="text-slate-500 hover:text-white transition-colors">
+                                <X size={14} />
+                              </button>
+                            </div>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-0 divide-y lg:divide-y-0 lg:divide-x divide-white/5">
+                              {/* Columna izquierda: Campos de edición */}
+                              <div className="p-5 space-y-4">
+                                <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-3">Datos a modificar</p>
+                                <div className="grid grid-cols-2 gap-3">
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Fecha Baja</label>
+                                    <input type="date" value={editDraft.baja}
+                                      onChange={e => setEditDraft({ ...editDraft, baja: e.target.value })}
+                                      className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Fecha Alta</label>
+                                    <input type="date" value={editDraft.alta}
+                                      onChange={e => setEditDraft({ ...editDraft, alta: e.target.value })}
+                                      className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Tipo</label>
+                                    <select value={editDraft.type}
+                                      onChange={e => setEditDraft({ ...editDraft, type: e.target.value as any })}
+                                      className="bg-slate-800/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    >
+                                      <option value="enfermedad">Enfermedad (75%)</option>
+                                      <option value="maternidad">Maternidad (90%)</option>
+                                      <option value="accidente">Accidente (90%)</option>
+                                    </select>
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Ciudad</label>
+                                    <select value={editDraft.city}
+                                      onChange={e => setEditDraft({ ...editDraft, city: e.target.value })}
+                                      className="bg-slate-800/80 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    >
+                                      {BOLIVIAN_CITIES.map(c => <option key={c} value={c}>{c}</option>)}
+                                    </select>
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Salario Base (Bs.)</label>
+                                    <input type="number" step="0.01" value={editDraft.basicSalary}
+                                      onChange={e => setEditDraft({ ...editDraft, basicSalary: parseFloat(e.target.value) || 0 })}
+                                      className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    />
+                                  </div>
+                                  <div className="flex flex-col gap-1">
+                                    <label className="text-[9px] font-black uppercase tracking-widest text-slate-500">Nro. Asegurado</label>
+                                    <input type="text" value={editDraft.insuredNumber}
+                                      onChange={e => setEditDraft({ ...editDraft, insuredNumber: e.target.value })}
+                                      className="bg-indigo-500/10 border border-indigo-500/20 rounded-xl px-3 py-2 text-md font-bold font-mono text-indigo-300 focus:outline-none focus:border-indigo-500/60 transition-all"
+                                    />
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Columna derecha: Resumen de cálculo en tiempo real */}
+                              {(() => {
+                                const ed = editDraft;
+                                const edRawDays = calculateDays(ed.baja, ed.alta);
+                                const edEffDays = ed.type === 'enfermedad' ? Math.max(0, edRawDays - 3) : edRawDays;
+                                const edPct = getPercentage(ed.type);
+                                const edDaily = ed.basicSalary / 30;
+                                const edPctAmt = edDaily * edPct;
+                                const edTotal = edPctAmt * edEffDays;
+                                return (
+                                  <div className="p-5">
+                                    <p className="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-3">Resumen del cálculo</p>
+                                    <div className="space-y-2">
+                                      {/* Salario Base */}
+                                      <div className="flex justify-between items-center py-2 border-b border-white/5">
+                                        <span className="text-[9px] uppercase font-black text-slate-500 tracking-widest">Salario Base</span>
+                                        <div className="text-right">
+                                          <span className="text-sm font-bold font-mono text-white">{ed.basicSalary.toLocaleString('es-BO', { minimumFractionDigits: 2 })} Bs.</span>
+                                        </div>
+                                      </div>
+                                      {/* Sueldo diario */}
+                                      <div className="flex justify-between items-center py-2 border-b border-white/5">
+                                        <span className="text-[9px] uppercase font-black text-slate-500 tracking-widest">Sueldo Diario (÷30)</span>
+                                        <span className="text-sm font-bold font-mono text-slate-300">{edDaily.toFixed(2)} Bs.</span>
+                                      </div>
+                                      {/* Monto x día */}
+                                      <div className="flex justify-between items-center py-2 border-b border-white/5">
+                                        <span className="text-[9px] uppercase font-black text-slate-500 tracking-widest">Monto x Día ({edPct * 100}%)</span>
+                                        <span className="text-sm font-bold font-mono text-indigo-300">{edPctAmt.toFixed(2)} Bs.</span>
+                                      </div>
+                                      {/* Días de baja */}
+                                      <div className="flex justify-between items-center py-2 border-b border-white/5">
+                                        <div>
+                                          <span className="text-[9px] uppercase font-black text-slate-500 tracking-widest">Días de Baja</span>
+                                          {ed.type === 'enfermedad' && edRawDays > 0 && (
+                                            <p className="text-[9px] text-amber-400/70 font-medium mt-0.5">{edRawDays} − 3 días carencia</p>
+                                          )}
+                                        </div>
+                                        <span className={`text-sm font-bold font-mono ${edEffDays > 0 ? 'text-white' : 'text-slate-600'}`}>
+                                          {edEffDays > 0 ? `${edEffDays} días` : '—'}
+                                        </span>
+                                      </div>
+                                      {/* Nro Asegurado */}
+                                      <div className="flex justify-between items-center py-2 border-b border-white/5">
+                                        <span className="text-[9px] uppercase font-black text-slate-500 tracking-widest">Nro. Asegurado</span>
+                                        <span className="text-xs font-bold text-indigo-300 text-[11px]">{editDraft.insuredNumber || '—'}</span>
+                                      </div>
+                                    </div>
+
+                                    {/* Total a pagar */}
+                                    <div className="mt-4 p-4 bg-emerald-500/10 rounded-xl border border-emerald-500/20">
+                                      <div className="flex justify-between items-end">
+                                        <div>
+                                          <p className="text-[9px] font-black uppercase tracking-widest text-emerald-400/70">Subsidio Total a Pagar</p>
+                                          <p className="text-[9px] text-slate-500 font-medium mt-1">{edPctAmt.toFixed(2)} × {edEffDays} días</p>
+                                        </div>
+                                        <span className="text-xl font-black font-mono text-emerald-400">
+                                          {edTotal.toFixed(2)} <span className="text-sm">Bs.</span>
+                                        </span>
+                                      </div>
+                                    </div>
+
+                                    {/* Botones */}
+                                    <div className="flex gap-2 mt-4">
+                                      <button onClick={handleSaveEdit} disabled={isLoading}
+                                        className="flex-1 flex items-center justify-center gap-1.5 py-2.5 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shadow-emerald-500/20"
+                                      >
+                                        <Check size={13} /> {isLoading ? 'Guardando...' : 'Guardar Cambios'}
+                                      </button>
+                                      <button onClick={handleCancelEdit}
+                                        className="px-4 py-2.5 bg-white/5 hover:bg-white/10 text-slate-400 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all"
+                                      >
+                                        <X size={13} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })()}
+                            </div>
                           </div>
-                        </div>
-                      </td>
-                      <td className="py-5 px-6">
-                        <div className="flex items-center gap-2">
-                          <div className={`h-1.5 w-1.5 rounded-full ${d.type === 'enfermedad' ? 'bg-blue-500' :
-                            d.type === 'maternidad' ? 'bg-purple-500' : 'bg-orange-500'
-                            }`} />
-                          <span className="text-[10px] font-bold uppercase tracking-tight text-slate-400">
-                            {d.type === 'accidente' ? 'Accidente' : d.type}
+                        </td>
+                      </tr>
+                    ) : (
+                      // ─── FILA NORMAL ───────────────────────────────────
+                      <tr key={d.id || i} className="hover:bg-white/[0.02] transition-all group">
+                        <td className="py-5 px-6">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-bold text-white group-hover:text-indigo-400 transition-colors">{d.employeeName}</span>
+                            <div className="flex items-center gap-2 mt-1">
+                              <span className="text-[10px] text-slate-500 font-medium">CI: {d.ci || "—"}</span>
+                              <span className="h-1 w-1 rounded-full bg-slate-700"></span>
+                              <span className="text-[10px] text-slate-500 font-medium">{d.city || "—"}</span>
+                              <span className="h-1 w-1 rounded-full bg-slate-700"></span>
+                              <span className="text-[10px] font-mono text-indigo-400/70">{d.calculations.insuredNumber}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-5 px-6">
+                          <div className="flex items-center gap-2">
+                            <div className={`h-1.5 w-1.5 rounded-full ${d.type === 'enfermedad' ? 'bg-blue-500' :
+                              d.type === 'maternidad' ? 'bg-purple-500' : 'bg-orange-500'
+                              }`} />
+                            <span className="text-[10px] font-bold uppercase tracking-tight text-slate-400">
+                              {d.type === 'accidente' ? 'Accidente' : d.type}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="py-5 px-6">
+                          <div className="flex flex-col">
+                            <div className="flex items-center gap-1.5 text-xs text-slate-300 font-medium">
+                              <span>{d.dates.baja}</span>
+                              <ArrowRight size={10} className="text-slate-600" />
+                              <span>{d.dates.alta}</span>
+                            </div>
+                            <span className="text-[10px] font-bold text-slate-500 mt-0.5 uppercase tracking-tighter">{d.calculations.totalDays} días efectivos</span>
+                          </div>
+                        </td>
+                        <td className="py-5 px-6 text-right">
+                          <div className="flex flex-col items-end">
+                            <span className="text-xs font-bold text-slate-300 font-mono">{(d.calculations.percentageAmount || 0).toFixed(2)} Bs/día</span>
+                            <span className="text-[9px] text-slate-500 uppercase font-medium mt-0.5">{d.calculations.percentage}% de {d.calculations.basicSalary} Bs.</span>
+                          </div>
+                        </td>
+                        <td className="py-5 px-6 text-right">
+                          <span className="text-sm font-black text-emerald-400 font-mono tracking-tight">
+                            {d.calculations.totalToPay.toFixed(2)} <span className="text-[10px] ml-0.5">Bs.</span>
                           </span>
-                        </div>
-                      </td>
-                      <td className="py-5 px-6">
-                        <div className="flex flex-col">
-                          <div className="flex items-center gap-1.5 text-xs text-slate-300 font-medium">
-                            <span>{d.dates.baja}</span>
-                            <ArrowRight size={10} className="text-slate-600" />
-                            <span>{d.dates.alta}</span>
+                        </td>
+                        <td className="py-5 px-6 text-center">
+                          <div className="flex justify-center gap-1">
+                            <button
+                              onClick={() => exportEmployeeSourceData(allEmployeesData, d?.ci ?? '', d.employeeName, d.dates.baja, d.dates.alta)}
+                              title="Exportar registros fuente (Excel)"
+                              className="p-2.5 text-slate-600 hover:text-emerald-500 hover:bg-emerald-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                            >
+                              <FileSpreadsheet size={16} />
+                            </button>
+                            <button
+                              onClick={() => handleStartEdit(d)}
+                              title="Editar registro"
+                              className="p-2.5 text-slate-600 hover:text-indigo-400 hover:bg-indigo-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                            >
+                              <Pencil size={15} />
+                            </button>
+                            <button
+                              onClick={() => deleteDisability(d.id)}
+                              title="Eliminar registro"
+                              className="p-2.5 text-slate-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"
+                            >
+                              <Trash2 size={16} />
+                            </button>
                           </div>
-                          <span className="text-[10px] font-bold text-slate-500 mt-0.5 uppercase tracking-tighter">{d.calculations.totalDays} días efectivos</span>
-                        </div>
-                      </td>
-                      <td className="py-5 px-6 text-right">
-                        <div className="flex flex-col items-end">
-                          <span className="text-xs font-bold text-slate-300 font-mono">{(d.calculations.percentageAmount || 0).toFixed(2)} Bs/día</span>
-                          <span className="text-[9px] text-slate-500 uppercase font-medium mt-0.5">{d.calculations.percentage}% de {d.calculations.basicSalary} Bs.</span>
-                        </div>
-                      </td>
-                      <td className="py-5 px-6 text-right">
-                        <span className="text-sm font-black text-emerald-400 font-mono tracking-tight">
-                          {d.calculations.totalToPay.toFixed(2)} <span className="text-[10px] ml-0.5">Bs.</span>
-                        </span>
-                      </td>
-                      <td className="py-5 px-6 text-center">
-                        <div className="flex justify-center gap-1">
-                          <button
-                            onClick={() => exportEmployeeSourceData(allEmployeesData, d?.ci ?? '', d.employeeName, d.dates.baja, d.dates.alta)}
-                            title="Exportar registros fuente (Excel)"
-                            className="p-2.5 text-slate-600 hover:text-emerald-500 hover:bg-emerald-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"
-                          >
-                            <FileSpreadsheet size={16} />
-                          </button>
-                          <button
-                            onClick={() => deleteDisability(d.id)}
-                            title="Eliminar registro"
-                            className="p-2.5 text-slate-600 hover:text-rose-500 hover:bg-rose-500/10 rounded-xl transition-all opacity-0 group-hover:opacity-100"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                        </td>
+                      </tr>
+                    )  // cierre ternario (fila normal)
+                  )}
                 </React.Fragment>
               ))}
             </tbody>

@@ -184,6 +184,21 @@ fn delete_disability(state: State<DbState>, id: String) -> Result<String, String
     Ok(format!("Planilla eliminada"))
 }
 
+#[tauri::command]
+fn update_disability(state: State<DbState>, id: String, data: serde_json::Value) -> Result<String, String> {
+    let conn = state.0.lock().unwrap();
+    let data_json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+    let rows_affected = conn.execute(
+        "UPDATE disabilities SET data = ?1 WHERE id = ?2",
+        params![data_json, id],
+    )
+    .map_err(|e| e.to_string())?;
+    if rows_affected == 0 {
+        return Err(format!("No se encontró la planilla con id {}", id));
+    }
+    Ok(format!("Planilla actualizada correctamente"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -241,7 +256,8 @@ pub fn run() {
             delete_file,
             save_disability,
             get_all_disabilities,
-            delete_disability
+            delete_disability,
+            update_disability
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
