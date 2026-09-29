@@ -7,8 +7,17 @@ import { DisabilityRecord } from "../types";
  * Limpia caracteres basura de Excel como _x000d_
  */
 const cleanStr = (val: any): any => {
-  if (typeof val !== 'string') return val;
-  return val.replace(/_x000d_/g, '').replace(/\r/g, '').trim();
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string') {
+    const cleaned = val.replace(/_x000d_/g, '').replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+    const lower = cleaned.toLowerCase();
+    if (lower === 'null' || lower === 'undefined') return '';
+    return cleaned;
+  }
+  const str = String(val).replace(/[\r\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const lowerStr = str.toLowerCase();
+  if (lowerStr === 'null' || lowerStr === 'undefined') return '';
+  return val;
 };
 
 /**
@@ -349,9 +358,9 @@ export const exportEmployeeSourceData = async (
 
   const sSignature = { font: { bold: true, sz: 10 }, alignment: { horizontal: "center" } };
 
-  // Limpiar llaves y obtener cabeceras
-  const keys = Object.keys(filtered[0]).map(k => cleanStr(k));
-  const rawKeys = Object.keys(filtered[0]);
+  // Limpiar llaves y obtener cabeceras (excluyendo columnas _source o _sources)
+  const rawKeys = Object.keys(filtered[0]).filter(k => k !== '_source' && k !== '_sources');
+  const keys = rawKeys.map(k => cleanStr(k));
 
   const wsData: any[][] = [
     [{ v: `PLANILLA SALARIAL - ${name}`, s: sTitle }],
@@ -406,3 +415,296 @@ export const exportEmployeeSourceData = async (
   const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
   await writeFile(filePath, new Uint8Array(buffer));
 };
+
+/**
+ * Exporta la planilla salarial general (registros fuente) de los empleados con incapacidades según la selección actual
+ */
+
+export type SalaryPayrollSchemaType = 'jjooss' | 'ss';
+
+/**
+ * Genera y descarga una planilla salarial para un tipo de esquema ('jjooss' | 'ss')
+ * Retorna true si se guardó, false si fue cancelado o no hubo filas.
+ */
+async function generateAndSaveSalarySheet(
+  schemaType: SalaryPayrollSchemaType,
+  allData: any[],
+  disabilities: DisabilityRecord[],
+  filter: "all" | "enfermedad" | "maternidad" | "accidente",
+  monthFilter: string,
+  cityFilter: string | undefined
+): Promise<'saved' | 'no_data' | 'cancelled'> {
+  const isJJOOSS = schemaType === 'jjooss';
+  const schemaLabel = isJJOOSS ? 'JJOOSS' : 'SS';
+
+  const parts = monthFilter.split("-");
+  const selectedYear = parseInt(parts[0], 10);
+  const selectedMonth = parseInt(parts[1], 10);
+  const mName = getMonthName(selectedMonth);
+
+  const cleanCI = (val: any) => String(val || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "").replace(/^0+/, "");
+  const normalizeStr = (val: any) => String(val || "").trim().toLowerCase().replace(/\s+/g, " ");
+
+  const parseMonth = (val: any): number => {
+    if (!val) return 0;
+    const num = parseInt(String(val), 10);
+    if (!isNaN(num) && num >= 1 && num <= 12) return num;
+    const str = String(val).trim().toUpperCase();
+    const months = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"];
+    const idx = months.indexOf(str);
+    return idx >= 0 ? idx + 1 : 0;
+  };
+
+  const normalizeYear = (y: number) => y < 100 ? 2000 + y : y;
+
+  const typeLabel = filter === "enfermedad" ? "ENFERMEDAD COMÚN (75%)" :
+    filter === "maternidad" ? "MATERNIDAD (90%)" :
+      filter === "accidente" ? "ACCIDENTE DE TRABAJO (90%)" : "INCAPACIDADES";
+
+  const title = `PLANILLA SALARIAL (${schemaLabel}) - ${typeLabel}`;
+  let title2 = `PERIODO: MES DE ${mName} ${selectedYear}`;
+  if (cityFilter && cityFilter !== "all") {
+    title2 += ` - ${cityFilter.toUpperCase()}`;
+  }
+
+  // Determina el tipo de planilla EXCLUSIVAMENTE por sus columnas/encabezados (100% independiente del nombre del archivo)
+  const isRowOfSchema = (row: any): boolean => {
+    const keysUpper = Object.keys(row).map(k => cleanStr(k).toUpperCase());
+    
+    // Si contiene la columna 'PAT' o 'NOM' o 'APES', pertenece al esquema SS (Suboficiales y Sargentos)
+    const isSS = keysUpper.includes('PAT') || keysUpper.includes('NOM') || keysUpper.includes('APES');
+    
+    // Si contiene 'APELLIDOS Y NOMBRES' o 'GRADO' (sin tener columnas de apellidos separadas), es JJOOSS
+    const isJJOOSS_schema = !isSS && (keysUpper.includes('APELLIDOS Y NOMBRES') || keysUpper.includes('GRADO') || keysUpper.includes('UNIDAD'));
+
+    if (isJJOOSS) {
+      return isJJOOSS_schema || !isSS;
+    } else {
+      return isSS;
+    }
+  };
+
+  const seenRowKeys = new Set<string>();
+  const filteredRows: any[] = [];
+
+  disabilities.forEach(d => {
+    const targetCI = cleanCI(d.ci);
+    const targetName = normalizeStr(d.employeeName);
+    const startMonth = d.dates.baja ? parseMonth(d.dates.baja.split("-")[1]) : selectedMonth;
+    const endMonth = d.dates.alta ? parseMonth(d.dates.alta.split("-")[1]) : selectedMonth;
+    const minM = Math.min(startMonth || selectedMonth, selectedMonth);
+    const maxM = Math.max(endMonth || selectedMonth, selectedMonth);
+
+    let empMatches = allData.filter(emp => {
+      if (!isRowOfSchema(emp)) return false;
+
+      const empCI = cleanCI(emp.CI || emp.ci || emp["Carnet de Identidad"] || emp["C.I."] || emp["CARNET"] || "");
+      const empName = normalizeStr(emp["APELLIDOS Y NOMBRES"] || `${emp["Pat"] || ""} ${emp["Mat"] || ""} ${emp["Nom"] || ""}`);
+
+      const isSameCI = targetCI && empCI && (
+        targetCI === empCI ||
+        (targetCI.length >= 5 && empCI.includes(targetCI)) ||
+        (empCI.length >= 5 && targetCI.includes(empCI))
+      );
+      const isSameName = !targetCI && targetName && empName && (
+        targetName === empName ||
+        (targetName.length > 8 && (empName.includes(targetName) || targetName.includes(empName)))
+      );
+
+      if (!isSameCI && !isSameName) return false;
+
+      const rawMes = emp["Mes"] || emp["MES"];
+      const empMonth = parseMonth(rawMes);
+      const monthMatches = empMonth === 0 || (empMonth >= minM && empMonth <= maxM) || empMonth === selectedMonth;
+      if (!monthMatches) return false;
+
+      const rawYear = String(emp["Año"] || emp["A_o"] || emp["AÑO"] || emp["A_O"] || "").trim();
+      if (rawYear && !isNaN(parseInt(rawYear, 10)) && selectedYear) {
+        const empYear = normalizeYear(parseInt(rawYear, 10));
+        if (empYear !== selectedYear) return false;
+      }
+
+      return true;
+    });
+
+    if (empMatches.length === 0) {
+      empMatches = allData.filter(emp => {
+        if (!isRowOfSchema(emp)) return false;
+
+        const empCI = cleanCI(emp.CI || emp.ci || emp["Carnet de Identidad"] || emp["C.I."] || emp["CARNET"] || "");
+        const empName = normalizeStr(emp["APELLIDOS Y NOMBRES"] || `${emp["Pat"] || ""} ${emp["Mat"] || ""} ${emp["Nom"] || ""}`);
+
+        const isSameCI = targetCI && empCI && (
+          targetCI === empCI ||
+          (targetCI.length >= 5 && empCI.includes(targetCI)) ||
+          (empCI.length >= 5 && targetCI.includes(empCI))
+        );
+        const isSameName = !targetCI && targetName && empName && (
+          targetName === empName ||
+          (targetName.length > 8 && (empName.includes(targetName) || targetName.includes(empName)))
+        );
+
+        return isSameCI || isSameName;
+      });
+    }
+
+    empMatches.forEach((row, rowIdx) => {
+      const rowKey = `${targetCI || targetName}_${row["Mes"] || row["MES"]}_${row["Año"] || row["A_o"] || row["AÑO"]}_${row._source || ""}_${row["Item"] || row["ITEM"] || rowIdx}`;
+      if (!seenRowKeys.has(rowKey)) {
+        seenRowKeys.add(rowKey);
+        const normRow: Record<string, any> = {};
+        Object.keys(row).forEach(k => {
+          if (k !== "_source" && k !== "_sources") {
+            const cleanKey = cleanStr(k);
+            normRow[cleanKey] = row[k];
+          }
+        });
+        filteredRows.push(normRow);
+      }
+    });
+  });
+
+  if (filteredRows.length === 0) {
+    return 'no_data';
+  }
+
+  const sHeader = {
+    font: { bold: true, sz: 10 },
+    alignment: { horizontal: "center", vertical: "center", wrapText: true },
+    border: {
+      top: { style: "thin" }, bottom: { style: "thin" },
+      left: { style: "thin" }, right: { style: "thin" }
+    },
+    fill: { fgColor: { rgb: "EEEEEE" } }
+  };
+
+  const sData = {
+    font: { sz: 9 },
+    alignment: { horizontal: "center", vertical: "center" },
+    border: {
+      top: { style: "thin" }, bottom: { style: "thin" },
+      left: { style: "thin" }, right: { style: "thin" }
+    }
+  };
+
+  const sTitle = {
+    font: { bold: true, sz: 14 },
+    alignment: { horizontal: "center" }
+  };
+
+  const sSignature = { font: { bold: true, sz: 10 }, alignment: { horizontal: "center" } };
+
+  const canonicalOrder = isJJOOSS
+    ? ['SS', 'UNIDAD', 'Desglose', 'Mes', 'A_o', 'CI', 'APELLIDOS Y NOMBRES', 'GRADO', 'Total Gan Cotiz.', 'Dtr.', 'C31', 'Cod. Entidad', 'Dir. Administrativa', 'Unidad Ejecutora', 'Fuente Financ.', 'Org. Financ.', 'NAC.']
+    : ['Cod. Unidad', 'Desglose', 'Mes', 'A_o', 'CI', 'Pat', 'Mat', 'ApEs', 'Nom', 'Nom2', 'Sex', 'Niv', 'Gra', 'Total Gan Cotiz.', 'Dtr.', 'C31', 'Cod. Entidad', 'Dir. Administrativa', 'Unidad Ejecutora', 'Fuente Financ.', 'Org. Financ.', 'NAC.'];
+
+  const presentCols = new Set<string>();
+  filteredRows.forEach(row => {
+    Object.keys(row).forEach(k => presentCols.add(k));
+  });
+
+  const keys: string[] = [];
+  canonicalOrder.forEach(col => {
+    if (presentCols.has(col)) {
+      keys.push(col);
+      presentCols.delete(col);
+    }
+  });
+  presentCols.forEach(col => keys.push(col));
+
+  const wsData: any[][] = [
+    [{ v: title, s: sTitle }],
+    [{ v: title2, s: sTitle }],
+    [],
+    keys.map(k => ({ v: k, s: sHeader }))
+  ];
+
+  filteredRows.forEach(row => {
+    wsData.push(keys.map(k => ({ v: cleanStr(row[k]), s: sData })));
+  });
+
+  wsData.push([], []);
+  const firstSigRow = wsData.length;
+  wsData.push([{ v: "Sgto Lic. Petronila Arminda Perez", s: sSignature }]);
+  wsData.push([{ v: "ENC. SUBCIDIO DE INCAPACIDAD TEMPORAL (SIT)", s: sSignature }]);
+  wsData.push([{ v: "POLICIA BOLIVIANA", s: sSignature }]);
+
+  const ws = XLSX.utils.aoa_to_sheet(wsData);
+
+  const lastCol = Math.max(keys.length - 1, 0);
+  ws["!merges"] = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: lastCol } },
+    { s: { r: 1, c: 0 }, e: { r: 1, c: lastCol } },
+    { s: { r: firstSigRow, c: 0 }, e: { r: firstSigRow, c: lastCol } },
+    { s: { r: firstSigRow + 1, c: 0 }, e: { r: firstSigRow + 1, c: lastCol } },
+    { s: { r: firstSigRow + 2, c: 0 }, e: { r: firstSigRow + 2, c: lastCol } }
+  ];
+
+  ws["!pageSetup"] = {
+    orientation: "landscape",
+    paperSize: 5,
+    fitToWidth: 1,
+    fitToHeight: 0
+  };
+
+  ws["!cols"] = keys.map(k => ({ wch: Math.max(k.length + 5, 12) }));
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, `Planilla ${schemaLabel}`);
+
+  let defaultName = `Planilla_Salarial_${schemaLabel}_${filter}`;
+  if (monthFilter && monthFilter !== "all" && monthFilter !== "Desconocido") {
+    defaultName += `_${mName}_${selectedYear}`;
+  } else {
+    defaultName += `_${new Date().toLocaleDateString().replace(/\//g, "-")}`;
+  }
+  if (cityFilter && cityFilter !== "all") {
+    defaultName += `_${cityFilter.replace(/\s+/g, "_").toUpperCase()}`;
+  }
+  defaultName += ".xlsx";
+
+  const filePath = await save({
+    defaultPath: defaultName,
+    filters: [{ name: `Excel - Planilla ${schemaLabel}`, extensions: ["xlsx"] }]
+  });
+
+  if (!filePath) return 'cancelled';
+
+  const buffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
+  await writeFile(filePath, new Uint8Array(buffer));
+  return 'saved';
+}
+
+/**
+ * Exporta la planilla salarial general generando consecutivamente los 2 archivos Excel descargables
+ * de acuerdo a sus encabezados (1. JJOOSS con 'APELLIDOS Y NOMBRES' y 2. SS con 'Pat'/'Nom'/'ApEs').
+ * Si alguno de los esquemas no tiene registros en el periodo, se descarga solo el que tenga datos.
+ */
+export const exportGeneralSalarySourceData = async (
+  allData: any[],
+  disabilities: DisabilityRecord[],
+  filter: "all" | "enfermedad" | "maternidad" | "accidente",
+  monthFilter: string,
+  cityFilter?: string
+) => {
+  if (!allData || allData.length === 0) {
+    alert("No hay datos de planillas cargados en el sistema.");
+    return;
+  }
+
+  if (disabilities.length === 0) {
+    alert("No hay registros de incapacidades en la selección actual.");
+    return;
+  }
+
+  // 1. Guardar primero Planilla JJOOSS (Jefes y Oficiales)
+  const resJJOOSS = await generateAndSaveSalarySheet('jjooss', allData, disabilities, filter, monthFilter, cityFilter);
+
+  // 2. Guardar a continuación Planilla SS (Suboficiales y Sargentos)
+  const resSS = await generateAndSaveSalarySheet('ss', allData, disabilities, filter, monthFilter, cityFilter);
+
+  if (resJJOOSS === 'no_data' && resSS === 'no_data') {
+    alert("No se encontraron registros en las planillas salariales para los empleados de la selección actual.");
+  }
+};
+

@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { DisabilityRecord } from "../../types";
 import { invoke } from "@tauri-apps/api/core";
-import { exportDisabilitiesToExcel, exportEmployeeSourceData } from "../../utils/disabilityExport";
+import { exportDisabilitiesToExcel, exportEmployeeSourceData, exportGeneralSalarySourceData } from "../../utils/disabilityExport";
 
 interface DisabilitiesPageProps {
   disabilities: DisabilityRecord[];
@@ -353,6 +353,39 @@ export function DisabilitiesPage({
     );
   };
 
+  const handleExportSalaryPayroll = async () => {
+    if (disabilityFilter === 'all') return;
+
+    if (selectedMonthGroup === 'all') {
+      alert('Por favor selecciona un mes específico en el filtro "Periodo" antes de descargar la planilla salarial.');
+      return;
+    }
+
+    let recordsToExport = disabilities.filter(d => {
+      if (d.type !== disabilityFilter) return false;
+      const parts = d.dates.alta.split('-');
+      const yearMonth = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : 'Desconocido';
+      if (yearMonth !== selectedMonthGroup) return false;
+      if (selectedCityFilter !== 'all' && d.city !== selectedCityFilter) return false;
+      return true;
+    });
+
+    if (recordsToExport.length === 0) {
+      alert(`No hay registros de ${disabilityFilter} para el periodo ${selectedMonthGroup}.`);
+      return;
+    }
+
+    recordsToExport = recordsToExport.sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+
+    await exportGeneralSalarySourceData(
+      allEmployeesData,
+      recordsToExport,
+      disabilityFilter,
+      selectedMonthGroup,
+      selectedCityFilter !== 'all' ? selectedCityFilter : undefined
+    );
+  };
+
   const getMonthName = (monthStr: string) => {
     const months = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"];
     const monthIndex = parseInt(monthStr, 10) - 1;
@@ -458,6 +491,11 @@ export function DisabilitiesPage({
     return acc;
   }, {} as Record<string, DisabilityRecord[]>);
 
+  // Ordenar los registros de cada grupo/mes alfabéticamente por nombre de empleado
+  Object.keys(paginatedGroups).forEach(month => {
+    paginatedGroups[month].sort((a, b) => a.employeeName.localeCompare(b.employeeName));
+  });
+
   const sortedPaginatedMonths = Object.keys(paginatedGroups).sort((a, b) => b.localeCompare(a));
 
 
@@ -485,33 +523,62 @@ export function DisabilitiesPage({
 
             <AnimatePresence mode="popLayout">
               {disabilityFilter !== 'all' && (
-                <motion.button
+                <motion.div
+                  key="export-actions"
                   layout
                   initial={{ opacity: 0, x: -10, scale: 0.9 }}
                   animate={{ opacity: 1, x: 0, scale: 1 }}
                   exit={{ opacity: 0, x: -10, scale: 0.9 }}
                   transition={{ type: "spring", stiffness: 400, damping: 25 }}
-                  onClick={handleExport}
-                  title={selectedMonthGroup === 'all' ? 'Selecciona un periodo para exportar' : `Exportar ${disabilityFilter} - ${selectedMonthGroup !== 'all' ? getMonthName(selectedMonthGroup.split('-')[1]) + ' ' + selectedMonthGroup.split('-')[0] : ''}`}
-                  className={`flex flex-col items-center gap-0.5 px-4 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shrink-0 ml-1 ${
-                    selectedMonthGroup !== 'all'
-                      ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/30'
-                      : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'
-                  }`}
+                  className="flex items-center gap-1.5 ml-1 shrink-0"
                 >
-                  <div className="flex items-center gap-1.5">
-                    <Download size={13} />
-                    <span>Reporte</span>
-                  </div>
-                  {selectedMonthGroup !== 'all' && (
-                    <span className="text-[8px] font-bold normal-case tracking-normal opacity-80">
-                      {getMonthName(selectedMonthGroup.split('-')[1])} {selectedMonthGroup.split('-')[0]}
-                    </span>
-                  )}
-                  {selectedMonthGroup === 'all' && (
-                    <span className="text-[8px] font-medium normal-case tracking-normal opacity-60">Elige periodo</span>
-                  )}
-                </motion.button>
+                  <button
+                    onClick={handleExport}
+                    title={selectedMonthGroup === 'all' ? 'Selecciona un periodo para exportar' : `Exportar Reporte ${disabilityFilter} - ${selectedMonthGroup !== 'all' ? getMonthName(selectedMonthGroup.split('-')[1]) + ' ' + selectedMonthGroup.split('-')[0] : ''}`}
+                    className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shrink-0 ${
+                      selectedMonthGroup !== 'all'
+                        ? 'bg-emerald-500 hover:bg-emerald-600 text-white shadow-emerald-500/30 cursor-pointer'
+                        : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Download size={13} />
+                      <span>Reporte</span>
+                    </div>
+                    {selectedMonthGroup !== 'all' && (
+                      <span className="text-[8px] font-bold normal-case tracking-normal opacity-80">
+                        {getMonthName(selectedMonthGroup.split('-')[1])} {selectedMonthGroup.split('-')[0]}
+                      </span>
+                    )}
+                    {selectedMonthGroup === 'all' && (
+                      <span className="text-[8px] font-medium normal-case tracking-normal opacity-60">Elige periodo</span>
+                    )}
+                  </button>
+
+                  {/* Botón único para descargar ambas planillas salariales (separadas en 2 archivos según sus encabezados) */}
+                  <button
+                    onClick={handleExportSalaryPayroll}
+                    title={selectedMonthGroup === 'all' ? 'Selecciona un periodo para exportar planillas salariales' : `Exportar Planillas Salariales (2 archivos por encabezado: JJOOSS y SS) ${disabilityFilter} - ${selectedMonthGroup !== 'all' ? getMonthName(selectedMonthGroup.split('-')[1]) + ' ' + selectedMonthGroup.split('-')[0] : ''}`}
+                    className={`flex flex-col items-center gap-0.5 px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-lg shrink-0 ${
+                      selectedMonthGroup !== 'all'
+                        ? 'bg-teal-600 hover:bg-teal-500 text-white shadow-teal-600/30 cursor-pointer'
+                        : 'bg-white/5 text-slate-500 cursor-not-allowed border border-white/5'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <FileSpreadsheet size={13} />
+                      <span>Planilla Salarial</span>
+                    </div>
+                    {selectedMonthGroup !== 'all' && (
+                      <span className="text-[8px] font-bold normal-case tracking-normal opacity-80">
+                        {getMonthName(selectedMonthGroup.split('-')[1])} {selectedMonthGroup.split('-')[0]}
+                      </span>
+                    )}
+                    {selectedMonthGroup === 'all' && (
+                      <span className="text-[8px] font-medium normal-case tracking-normal opacity-60">Elige periodo</span>
+                    )}
+                  </button>
+                </motion.div>
               )}
             </AnimatePresence>
           </div>
