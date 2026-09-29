@@ -200,6 +200,12 @@ fn update_disability(state: State<DbState>, id: String, data: serde_json::Value)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[tauri::command]
+fn read_file_binary(path: String) -> Result<Vec<u8>, String> {
+    fs::read(&path).map_err(|e| format!("Error al leer el archivo {}: {}", path, e))
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -257,7 +263,8 @@ pub fn run() {
             save_disability,
             get_all_disabilities,
             delete_disability,
-            update_disability
+            update_disability,
+            read_file_binary
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

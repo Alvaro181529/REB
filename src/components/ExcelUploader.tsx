@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { Upload, FileSpreadsheet, CheckCircle2, X, Layers } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 
 interface LoadedFile {
   id: string;
@@ -32,6 +33,49 @@ const ExcelUploader = ({ onFilesUpdated }: ExcelUploaderProps) => {
       workerRef.current?.terminate();
     };
   }, []);
+
+  const processArrayBufferWithWorker = (fileData: ArrayBuffer, fileName: string): Promise<LoadedFile | null> => {
+    return new Promise((resolve) => {
+      if (!workerRef.current) {
+        console.error("Worker not initialized");
+        resolve(null);
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        console.error("Worker timeout for file:", fileName);
+        workerRef.current?.removeEventListener('message', onMessage);
+        resolve(null);
+      }, 10000);
+
+      const onMessage = (event: MessageEvent) => {
+        const result = event.data;
+        if (result.fileName === fileName) {
+          clearTimeout(timeout);
+          workerRef.current?.removeEventListener('message', onMessage);
+
+          if (result.success) {
+            resolve({
+              id: Math.random().toString(36).substr(2, 9),
+              name: result.fileName,
+              columns: result.columns,
+              rows: result.rows,
+              rowCount: result.rowCount
+            });
+          } else {
+            console.error("Worker failed to parse:", result.error);
+            resolve(null);
+          }
+        }
+      };
+
+      workerRef.current.addEventListener('message', onMessage);
+      workerRef.current.postMessage({
+        fileData,
+        fileName
+      });
+    });
+  };
 
   const processFileWithWorker = (file: File): Promise<LoadedFile | null> => {
     return new Promise((resolve) => {
@@ -106,6 +150,67 @@ const ExcelUploader = ({ onFilesUpdated }: ExcelUploaderProps) => {
     onFilesUpdated(updatedList);
     setIsProcessing(false);
   }, [loadedFiles, onFilesUpdated]);
+
+  const handleFilePaths = useCallback(async (paths: string[]) => {
+    setIsProcessing(true);
+    const newLoadedFiles: LoadedFile[] = [];
+
+    for (const filePath of paths) {
+      // Obtener el nombre del archivo del path (compatible con Windows y Linux/Mac)
+      const fileName = filePath.replace(/\\/g, '/').split('/').pop() || 'archivo.xlsx';
+      const ext = fileName.split('.').pop()?.toLowerCase();
+      if (['xlsx', 'xls', 'csv'].includes(ext || '')) {
+        try {
+          const bytes = await invoke<number[] | Uint8Array>("read_file_binary", { path: filePath });
+          const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+          const processed = await processArrayBufferWithWorker(u8.buffer, fileName);
+          if (processed) {
+            newLoadedFiles.push(processed);
+          }
+        } catch (err) {
+          console.error("Error reading dropped file from path:", filePath, err);
+        }
+      }
+    }
+
+    if (newLoadedFiles.length > 0) {
+      const updatedList = [...loadedFiles, ...newLoadedFiles];
+      setLoadedFiles(updatedList);
+      onFilesUpdated(updatedList);
+    }
+    setIsProcessing(false);
+  }, [loadedFiles, onFilesUpdated]);
+
+  // Soporte nativo para Drag and Drop de Tauri v2
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+
+    const setupTauriDragDrop = async () => {
+      try {
+        const webview = getCurrentWebview();
+        unlisten = await webview.onDragDropEvent((event) => {
+          if (event.payload.type === 'over' || event.payload.type === 'enter') {
+            setIsDragging(true);
+          } else if (event.payload.type === 'drop') {
+            setIsDragging(false);
+            if (event.payload.paths && event.payload.paths.length > 0) {
+              handleFilePaths(event.payload.paths);
+            }
+          } else {
+            setIsDragging(false);
+          }
+        });
+      } catch (err) {
+        console.warn("Tauri onDragDropEvent not available (running in web browser?):", err);
+      }
+    };
+
+    setupTauriDragDrop();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [handleFilePaths]);
 
   const removeFile = (id: string) => {
     const updatedList = loadedFiles.filter(f => f.id !== id);
