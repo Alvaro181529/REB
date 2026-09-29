@@ -1,7 +1,25 @@
 import * as XLSX from "xlsx-js-style";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeFile } from "@tauri-apps/plugin-fs";
+import { invoke } from "@tauri-apps/api/core";
 import { DisabilityRecord } from "../types";
+
+/**
+ * Guarda un archivo binario de forma segura y compatible con cualquier versión de Windows/Linux.
+ * Utiliza el comando nativo de Rust `save_file_binary` (con fs::write directo),
+ * garantizando que Windows 10/11 LTSC no bloquee la escritura por permisos de sandbox del plugin FS.
+ */
+async function writeBinaryFile(filePath: string, buffer: ArrayBuffer | Uint8Array): Promise<void> {
+  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
+  try {
+    // Intento 1: Comando nativo en Rust (sin restricciones de sandbox del plugin FS)
+    await invoke("save_file_binary", { path: filePath, contents: Array.from(bytes) });
+  } catch (nativeErr) {
+    console.warn("Fallo invoke save_file_binary, intentando plugin-fs writeFile:", nativeErr);
+    // Intento 2: Fallback con el plugin-fs estándar
+    await writeFile(filePath, bytes);
+  }
+}
 
 /**
  * Limpia caracteres basura de Excel como _x000d_
@@ -299,7 +317,7 @@ export const exportDisabilitiesToExcel = async (
   if (!filePath) return;
 
   const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  await writeFile(filePath, new Uint8Array(buffer));
+  await writeBinaryFile(filePath, buffer);
 };
 
 /**
@@ -413,7 +431,7 @@ export const exportEmployeeSourceData = async (
   if (!filePath) return;
 
   const buffer = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
-  await writeFile(filePath, new Uint8Array(buffer));
+  await writeBinaryFile(filePath, buffer);
 };
 
 /**
@@ -487,6 +505,31 @@ async function generateAndSaveSalarySheet(
   const seenRowKeys = new Set<string>();
   const filteredRows: any[] = [];
 
+  // OPTIMIZACIÓN DE ALTO RENDIMIENTO (evita escaneo O(D * N) de ~5 minutos con 200,000+ filas):
+  // 1. Pre-indexamos los datos del esquema en un Map por CI y un Map por Nombre normalizado.
+  const schemaRowsByCI = new Map<string, any[]>();
+  const schemaRowsByName = new Map<string, any[]>();
+
+  for (let i = 0; i < allData.length; i++) {
+    const emp = allData[i];
+    if (!isRowOfSchema(emp)) continue;
+
+    const empCI = cleanCI(emp.CI || emp.ci || emp["Carnet de Identidad"] || emp["C.I."] || emp["CARNET"] || "");
+    if (empCI) {
+      const list = schemaRowsByCI.get(empCI);
+      if (list) list.push(emp);
+      else schemaRowsByCI.set(empCI, [emp]);
+    }
+
+    const empName = normalizeStr(emp["APELLIDOS Y NOMBRES"] || `${emp["Pat"] || ""} ${emp["Mat"] || ""} ${emp["Nom"] || ""}`);
+    if (empName) {
+      const list = schemaRowsByName.get(empName);
+      if (list) list.push(emp);
+      else schemaRowsByName.set(empName, [emp]);
+    }
+  }
+
+  // 2. Para cada incapacidad, búsqueda O(1) inmediata en los Maps indexados
   disabilities.forEach(d => {
     const targetCI = cleanCI(d.ci);
     const targetName = normalizeStr(d.employeeName);
@@ -495,28 +538,28 @@ async function generateAndSaveSalarySheet(
     const minM = Math.min(startMonth || selectedMonth, selectedMonth);
     const maxM = Math.max(endMonth || selectedMonth, selectedMonth);
 
-    let empMatches = allData.filter(emp => {
-      if (!isRowOfSchema(emp)) return false;
+    // Obtener candidatos directamente por CI o Nombre
+    let candidates: any[] = [];
+    if (targetCI && schemaRowsByCI.has(targetCI)) {
+      candidates = schemaRowsByCI.get(targetCI)!;
+    } else if (targetName && schemaRowsByName.has(targetName)) {
+      candidates = schemaRowsByName.get(targetName)!;
+    } else if (targetCI) {
+      // Fallback substring para CI
+      for (const [ciKey, list] of schemaRowsByCI.entries()) {
+        if ((targetCI.length >= 5 && ciKey.includes(targetCI)) || (ciKey.length >= 5 && targetCI.includes(ciKey))) {
+          candidates = candidates.concat(list);
+        }
+      }
+    }
 
-      const empCI = cleanCI(emp.CI || emp.ci || emp["Carnet de Identidad"] || emp["C.I."] || emp["CARNET"] || "");
-      const empName = normalizeStr(emp["APELLIDOS Y NOMBRES"] || `${emp["Pat"] || ""} ${emp["Mat"] || ""} ${emp["Nom"] || ""}`);
-
-      const isSameCI = targetCI && empCI && (
-        targetCI === empCI ||
-        (targetCI.length >= 5 && empCI.includes(targetCI)) ||
-        (empCI.length >= 5 && targetCI.includes(empCI))
-      );
-      const isSameName = !targetCI && targetName && empName && (
-        targetName === empName ||
-        (targetName.length > 8 && (empName.includes(targetName) || targetName.includes(empName)))
-      );
-
-      if (!isSameCI && !isSameName) return false;
-
+    // Filtrar candidatos estrictamente por el mes/año seleccionado
+    let empMatches = candidates.filter(emp => {
       const rawMes = emp["Mes"] || emp["MES"];
       const empMonth = parseMonth(rawMes);
-      const monthMatches = empMonth === 0 || (empMonth >= minM && empMonth <= maxM) || empMonth === selectedMonth;
-      if (!monthMatches) return false;
+      // El registro debe coincidir con el periodo filtrado o el rango del mes
+      const monthMatches = (empMonth >= minM && empMonth <= maxM) || empMonth === selectedMonth;
+      if (!monthMatches && empMonth !== 0) return false;
 
       const rawYear = String(emp["Año"] || emp["A_o"] || emp["AÑO"] || emp["A_O"] || "").trim();
       if (rawYear && !isNaN(parseInt(rawYear, 10)) && selectedYear) {
@@ -526,27 +569,6 @@ async function generateAndSaveSalarySheet(
 
       return true;
     });
-
-    if (empMatches.length === 0) {
-      empMatches = allData.filter(emp => {
-        if (!isRowOfSchema(emp)) return false;
-
-        const empCI = cleanCI(emp.CI || emp.ci || emp["Carnet de Identidad"] || emp["C.I."] || emp["CARNET"] || "");
-        const empName = normalizeStr(emp["APELLIDOS Y NOMBRES"] || `${emp["Pat"] || ""} ${emp["Mat"] || ""} ${emp["Nom"] || ""}`);
-
-        const isSameCI = targetCI && empCI && (
-          targetCI === empCI ||
-          (targetCI.length >= 5 && empCI.includes(targetCI)) ||
-          (empCI.length >= 5 && targetCI.includes(empCI))
-        );
-        const isSameName = !targetCI && targetName && empName && (
-          targetName === empName ||
-          (targetName.length > 8 && (empName.includes(targetName) || targetName.includes(empName)))
-        );
-
-        return isSameCI || isSameName;
-      });
-    }
 
     empMatches.forEach((row, rowIdx) => {
       const rowKey = `${targetCI || targetName}_${row["Mes"] || row["MES"]}_${row["Año"] || row["A_o"] || row["AÑO"]}_${row._source || ""}_${row["Item"] || row["ITEM"] || rowIdx}`;
@@ -671,7 +693,7 @@ async function generateAndSaveSalarySheet(
   if (!filePath) return 'cancelled';
 
   const buffer = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-  await writeFile(filePath, new Uint8Array(buffer));
+  await writeBinaryFile(filePath, buffer);
   return 'saved';
 }
 

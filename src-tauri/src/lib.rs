@@ -199,10 +199,14 @@ fn update_disability(state: State<DbState>, id: String, data: serde_json::Value)
     Ok(format!("Planilla actualizada correctamente"))
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
 #[tauri::command]
 fn read_file_binary(path: String) -> Result<Vec<u8>, String> {
     fs::read(&path).map_err(|e| format!("Error al leer el archivo {}: {}", path, e))
+}
+
+#[tauri::command]
+fn save_file_binary(path: String, contents: Vec<u8>) -> Result<(), String> {
+    fs::write(&path, contents).map_err(|e| format!("Error al guardar el archivo en {}: {}", path, e))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -264,7 +268,8 @@ pub fn run() {
             get_all_disabilities,
             delete_disability,
             update_disability,
-            read_file_binary
+            read_file_binary,
+            save_file_binary
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
